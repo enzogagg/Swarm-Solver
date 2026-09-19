@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Awaitable, Callable
 
+from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape
@@ -9,11 +10,13 @@ from rich.table import Table
 from .config import Settings
 from .dedup import dedupe_ideas
 from .ideation import explore_variants
+from .interrupts import Interrupted, UserQuit, interruptible
 from .llm import LLMClient
 from .logs import LOG
 from .pipeline import RunResult, SolveParams, screen_and_audit, solve
 from .research import ask_web, brief_block
 from .schemas import DeepResult
+from .ui import score_bar
 from .verify import deep_verify
 
 log = logging.getLogger(f"{LOG}.session")
@@ -30,7 +33,8 @@ HELP = """[bold]Commandes[/bold]
   [cyan]recherche <question>[/cyan]  cherche sur le web pour répondre à une question précise, avec sources
   [cyan]sources[/cyan]               liste les sources web collectées
   [cyan]<question libre>[/cyan]      discute des solutions, ex: et si le budget est divisé par deux ?
-  [cyan]q[/cyan]                     quitter"""
+  [cyan]q[/cyan]                     quitter
+  [dim]Ctrl+C annule la commande en cours et te ramène ici.[/dim]"""
 
 DETAILER = """You are a strategist turning ONE chosen solution into an execution plan for the user. Be concrete and candid.
 
@@ -71,13 +75,17 @@ class Session:
     # --- affichage ---------------------------------------------------------------------------------------------
 
     def show_table(self) -> None:
-        table = Table(title="Solutions retenues", show_lines=False)
-        for col in ("#", "Score", "Risque", "Solution", "Angle"):
-            table.add_column(col)
+        table = Table(title="Solutions retenues", box=box.ROUNDED, border_style="cyan", header_style="bold cyan")
+        table.add_column("#", justify="right", style="bold")
+        table.add_column("Score", no_wrap=True)
+        table.add_column("Risque", no_wrap=True)
+        table.add_column("Solution", overflow="fold")
+        table.add_column("Angle", style="dim", overflow="fold")
         colors = {"low": "green", "medium": "yellow", "high": "red"}
         for rank, r in enumerate(self.result.survivors, 1):
             table.add_row(
-                str(rank), f"{r.total:.1f}", f"[{colors[r.risk_level]}]{r.risk_level}[/]", escape(r.idea.title), escape(r.idea.lens[:48])
+                str(rank), score_bar(r.total), f"[{colors[r.risk_level]}]{r.risk_level}[/]",
+                escape(r.idea.title), escape(r.idea.lens[:48]),
             )
         self.console.print(table)
         s = self.result.stats
@@ -112,7 +120,11 @@ class Session:
             if line.lower() in {"q", "quit", "exit", "quitter"}:
                 break
             try:
-                await self._dispatch(line)
+                await interruptible(self._dispatch(line))
+            except Interrupted:
+                self.console.print("\n[yellow]Commande interrompue.[/yellow]")
+            except UserQuit:
+                self.console.print("[yellow]Commande annulée.[/yellow]")
             except Exception as e:  # noqa: BLE001 - une commande ratée ne doit pas fermer la session
                 log.debug("commande %r échouée", line, exc_info=True)
                 self.console.print(f"[red]Échec: {type(e).__name__}: {e}[/red]")
@@ -176,12 +188,14 @@ class Session:
 
     async def _more(self) -> None:
         res = self.result
-        batch = res.take_reserve(self.params.pool)
+        batch = res.peek_reserve(self.params.pool)
         if not batch:
             self.console.print("[yellow]Réserve vide. Essaie `variantes N` pour générer de nouvelles pistes.[/yellow]")
             return
         before = len(res.survivors)
-        res.audited += await deep_verify(self.llm, self.settings, self.console, res.spec, batch, res.brief)
+        audited = await deep_verify(self.llm, self.settings, self.console, res.spec, batch, res.brief)
+        res.audited += audited
+        del res.reserve[: len(batch)]  # seulement maintenant: si on est interrompu, le lot reste en réserve
         res.save()
         self.console.print(f"{len(batch)} idées auditées, {len(res.survivors) - before} retenues.")
         self.show_table()
@@ -199,11 +213,14 @@ class Session:
     async def _info(self, text: str) -> None:
         spec = self.result.spec.model_copy(update={"key_facts": [*self.result.spec.key_facts, text]})
         self.console.print("Fait ajouté à la fiche, relance de la résolution...")
-        self.result = await solve(self.llm, self.settings, self.console, spec, self.params)
+        self.result = await solve(self.llm, self.settings, self.console, spec, self.params, self._confirm)
         report = self.result.run_dir / "report.md"
         if report.exists():
             self.console.print(Markdown(report.read_text(encoding="utf-8")))
         self.show_table()
+
+    async def _confirm(self, question: str) -> bool:
+        return (await self.read(f"{question} [O/n] ")).strip().lower() not in {"n", "non"}
 
     async def _web(self, question: str) -> None:
         res = self.result

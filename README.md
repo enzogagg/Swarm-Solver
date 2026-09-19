@@ -89,6 +89,43 @@ Après le rapport, un prompt `swarm>` s'ouvre :
 
 `--no-followup` désactive la session. `--no-web` (ou `SWARM_WEB=0`) désactive toute recherche sur internet.
 
+## Reprendre un run
+
+Chaque étape est écrite sur disque dès qu'elle est finie (la recherche web l'est même avant sa synthèse). Si un run
+s'arrête (Ctrl+C, terminal fermé, panne), `resume` recharge ce qui existe, **ne refait que ce qui manque**, puis
+rouvre la session `swarm>` :
+
+```bash
+uv run swarm-solver resume                          # le run le plus récent
+uv run swarm-solver resume runs/20260919-165549     # un run précis (chemin ou nom)
+uv run swarm-solver resume runs/20260919-165549 --ideas 50 --pool 10   # mêmes réglages que le run d'origine
+```
+
+- Un run **terminé** est rechargé sans aucun appel au modèle : tu retrouves le rapport, le classement et les commandes
+  (`variantes`, `encore`, `recherche`...). Les idées gardées en réserve (`reserve.jsonl`) reviennent avec leur note.
+- Un run **interrompu** repart de la première étape absente : par exemple, recherche déjà faite, on enchaîne sur la
+  synthèse puis l'analyse, l'essaim, l'audit et le rapport.
+- Les fichiers d'une ancienne version sont relus quand c'est possible (une analyse au format périmé est refaite ; la
+  note du filtre des idées en réserve, non sauvegardée à l'époque, est remplacée par une note neutre de 5/10).
+- L'historique de discussion de la session (`swarm>`) n'est pas conservé : seul l'état du run l'est.
+
+## Interrompre (Ctrl+C)
+
+| Où tu es | Ctrl+C fait |
+|---|---|
+| **Recherche web** | interrompt la recherche seule et te demande « Continuer la résolution sans le web ? » : `O` poursuit avec les autres étapes, `n` quitte |
+| **Une commande de la session** (`variantes`, `encore`, `recherche`, détail...) | annule la commande et te ramène au prompt `swarm>`, sans rien perdre : un lot d'idées interrompu reste en réserve |
+| **Toute autre étape** (analyse, essaim, audits, rapport) | arrête le programme proprement (code 130, sans trace d'erreur) ; ce qui a déjà été produit reste dans `runs/<date>/` |
+
+Les requêtes en cours vers Ollama sont annulées avec l'étape. Ce qui avait déjà été collecté par une recherche web
+interrompue n'est pas réutilisé.
+
+## Interface
+
+Bandeau de départ (modèles, web, droit), fiche problème en panneau, étapes numérotées (« Étape 3/7 ») avec leur
+durée, tableau des solutions avec barres de score colorées (vert, jaune, rouge) et niveau de risque, rapport en
+panneau, puis entonnoir en barres proportionnelles et temps passé par étape.
+
 ## Mode verbose
 
 | Option | Affiche |
@@ -101,7 +138,8 @@ Dès `-v`, tout (prompts et réponses complets compris) est aussi écrit dans `r
 ## Sorties
 
 Chaque run écrit dans `runs/<date>/` : `problem.json`, `analysis.json`, `ideas_raw.jsonl`, `ideas_unique.jsonl`,
-`research.json`, `audits.jsonl`, `dropped.jsonl` (idées écartées et raison), `stats.json`, `report.md`, `detail-<id>.md`.
+`research.json`, `audits.jsonl`, `dropped.jsonl` (idées écartées et raison), `reserve.jsonl` (idées en attente
+d'audit), `stats.json`, `report.md`, `detail-<id>.md`.
 
 ## Réglages (variables d'environnement)
 

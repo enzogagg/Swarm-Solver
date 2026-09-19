@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 LENS_WEIGHTS = {"feasibility": 0.4, "constraints_risk": 0.35, "legality": 0.25}
 # Part du score "impact attendu" (donné par le filtre) dans le classement final.
@@ -133,6 +135,15 @@ class DeepResult(BaseModel):
     idea: Idea
     gate_score: int
     lenses: dict[str, LensVerdict]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _rename_old_lens(cls, data: Any) -> Any:
+        """Les premiers runs nommaient la lentille de légalité `legal_ethics`: on la relit sous son nom actuel."""
+        lenses = data.get("lenses") if isinstance(data, dict) else None
+        if isinstance(lenses, dict) and "legal_ethics" in lenses and "legality" not in lenses:
+            data = {**data, "lenses": {("legality" if k == "legal_ethics" else k): v for k, v in lenses.items()}}
+        return data
 
     @property
     def rejection(self) -> str | None:

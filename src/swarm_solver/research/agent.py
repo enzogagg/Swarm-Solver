@@ -1,6 +1,7 @@
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import asynccontextmanager, nullcontext
 from urllib.parse import urlparse
 
@@ -283,8 +284,13 @@ async def run_research(
     spec: ProblemSpec,
     providers: dict[Origin, SearchProvider] | None = None,
     fetcher: Fetcher | None = None,
+    on_progress: Callable[[Research], None] | None = None,
 ) -> Research | None:
-    """Recherche complète: requêtes -> résultats -> pages -> faits sourcés -> dossier. None si rien d'exploitable."""
+    """Recherche complète: requêtes -> résultats -> pages -> faits sourcés -> dossier. None si rien d'exploitable.
+
+    `on_progress` reçoit la recherche dès que les faits sont extraits (dossier encore vide), puis une fois le dossier
+    rédigé: l'extraction dure des minutes, elle ne doit pas être perdue si le programme s'arrête avant la synthèse.
+    """
     plan = await plan_queries(llm, settings, spec)
     show_plan(console, plan)
     async with _client(settings) as client:
@@ -294,8 +300,20 @@ async def run_research(
     if not findings:
         console.print("[yellow]La recherche n'a rien donné d'exploitable.[/yellow]")
         return None
-    brief = await synthesize(llm, settings, findings, {s.id for s in sources}, console)
-    return Research(plan=plan, sources=sources, findings=findings, brief=brief)
+    research = Research(plan=plan, sources=sources, findings=findings)
+    if on_progress:
+        on_progress(research)
+    research.brief = await synthesize(llm, settings, findings, {s.id for s in sources}, console)
+    if on_progress:
+        on_progress(research)
+    return research
+
+
+async def complete_brief(llm: LLMClient, settings: Settings, console: Console, research: Research) -> Research:
+    """Rédige le dossier d'une recherche reprise du disque si elle s'était arrêtée avant la synthèse."""
+    if research.findings and research.brief.empty:
+        research.brief = await synthesize(llm, settings, research.findings, {s.id for s in research.sources}, console)
+    return research
 
 
 async def ask_web(
