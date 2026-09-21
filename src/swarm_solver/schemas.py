@@ -5,9 +5,11 @@ from pydantic import BaseModel, Field, model_validator
 LENS_WEIGHTS = {"feasibility": 0.4, "constraints_risk": 0.35, "legality": 0.25}
 # Part du score "impact attendu" (donné par le filtre) dans le classement final.
 IMPACT_WEIGHT = 0.3
-# Une idée n'est écartée pour infaisabilité que si l'auditeur la juge impossible ET la note à ce seuil ou moins.
-# Sur un vrai run, "bloquant" tombait sur des notes de 4-5/10 et écartait arbitrairement des idées voisines.
-INFEASIBLE_MAX_SCORE = 3
+# Seuils des ALERTES affichées à l'utilisateur. Elles ne retirent aucune idée: c'est lui qui décide.
+INFEASIBLE_MAX_SCORE = 3  # faisabilité notée à ce seuil ou moins
+DOUBTFUL_LEGALITY_BELOW = 5  # légalité notée sous ce seuil
+# Une idée jugée peu plausible par le filtre garde sa place, mais sa note est plafonnée à ceci.
+IMPLAUSIBLE_SCORE_CAP = 4
 
 # Seules exclusions codées en dur : on borne les MOYENS (illégal, nuisible), jamais l'objectif ni le "ton".
 # Ajoutées à chaque prompt, indépendamment de ce que l'interview a produit.
@@ -121,7 +123,11 @@ class GateVerdict(BaseModel):
 
     @property
     def passed(self) -> bool:
-        return self.plausible and not self.violates_red_line and not self.illegal_or_harmful
+        """Écarte seulement ce que l'utilisateur a interdit, ou ce qui repose sur un acte illégal ou nuisible.
+
+        `plausible=False` n'écarte plus rien: c'est un jugement de petit modèle, la note est plafonnée à la place.
+        """
+        return not self.violates_red_line and not self.illegal_or_harmful
 
 
 class LensVerdict(BaseModel):
@@ -147,14 +153,28 @@ class DeepResult(BaseModel):
 
     @property
     def rejection(self) -> str | None:
-        """Raison du rejet, ou None. Seuls l'illégal/nuisible et l'impossible écartent une idée: le risque, jamais."""
+        """Raison du rejet par défaut, ou None. Seul l'illégal ou le gravement nuisible avéré écarte une idée.
+
+        Ni le risque, ni la difficulté, ni une note de légalité basse n'écartent: ce sont des `warnings`. L'utilisateur
+        peut de toute façon remettre une idée écartée dans le classement (`garder`).
+        """
         legality = self.lenses["legality"]
-        if legality.blocking or legality.score < 5:
+        if legality.blocking:
             return "illégal ou nuisible: " + ("; ".join(legality.issues) or "jugé non recommandable")
-        feasibility = self.lenses["feasibility"]
-        if feasibility.blocking and feasibility.score <= INFEASIBLE_MAX_SCORE:
-            return "infaisable: " + ("; ".join(feasibility.issues) or "impossible à exécuter")
         return None
+
+    @property
+    def warnings(self) -> list[str]:
+        """Alertes à afficher à côté de l'idée. Elles informent, elles ne retirent rien."""
+        out = []
+        legality, feasibility = self.lenses["legality"], self.lenses["feasibility"]
+        if legality.score < DOUBTFUL_LEGALITY_BELOW:
+            out.append("légalité")
+        if feasibility.blocking or feasibility.score <= INFEASIBLE_MAX_SCORE:
+            out.append("faisabilité")
+        if self.risk_level == "high":
+            out.append("risque")
+        return out
 
     @property
     def total(self) -> float:

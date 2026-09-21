@@ -5,11 +5,12 @@ from dataclasses import dataclass, field
 from rich.console import Console
 
 from .config import Settings
+from .dedup import pick_diverse
 from .llm import LLMClient
 from .logs import LOG
 from .progress import gather_tolerant
 from .research import ResearchBrief, brief_block
-from .schemas import LENS_WEIGHTS, DeepResult, GateVerdict, Idea, LensVerdict, ProblemSpec
+from .schemas import IMPLAUSIBLE_SCORE_CAP, LENS_WEIGHTS, DeepResult, GateVerdict, Idea, LensVerdict, ProblemSpec
 
 log = logging.getLogger(f"{LOG}.verify")
 
@@ -25,13 +26,10 @@ someone look bad, and so on.
   provoking or staging misconduct by someone, physical violence, or a sustained campaign to torment someone.
   Being ethically questionable is NOT a reason to set it.
 - violates_red_line=true only if it crosses a limit the user explicitly stated.
-- plausible=false if ANY of these holds:
-  * it is too vague to act on;
-  * a step needs an authority, access or status the user does not have. Read the user's position in the key facts
-    and constraints: for example a junior employee cannot approve a budget or give orders to other teams, and a
-    customer cannot change a supplier's roadmap;
-  * its success depends on people who are stated to obstruct the goal or to benefit from the problem acting against
-    their own interest of their own accord, with nothing forcing them to.
+- plausible=false only if the idea is too vague to act on. A step that needs an authority, access or status the user
+  does not have today (read their position in the key facts and constraints), or that depends on people who obstruct
+  the goal acting against their own interest, is NOT a reason to discard: it is a reason for a LOWER score. The user
+  decides what is worth pursuing, so ideas that need help or a bold move still deserve a fair score.
 - score 0-10 = expected value: how much it moves the user's goal, times how likely it is to work given the actual
   power relations and constraints. Anchors: 8-10 = forces someone to act even if those who obstruct stay passive, and
   the user can start it alone this week; 6-7 = credible but depends on someone's goodwill or on a scarce ally;
@@ -45,9 +43,9 @@ LENS_PROMPTS = {
 stand, given the key facts, constraints and the resources they DO have? Look for missing prerequisites, unrealistic
 timelines, and steps that depend on an actor who is stated to be hostile to the goal or to benefit from the
 problem, with no workaround. If the resources list is empty, judge whether an ordinary person in their position could do the steps;
-do not assume the worst. Difficulty, or dependence on someone's cooperation, is a RISK: lower the score, do not
-block. blocking=true only if it is impossible for this person (for example it requires an authority they lack by
-law or contract), and then the score must be 3 or less.""",
+do not assume the worst. Difficulty, or dependence on someone's cooperation, is a RISK: lower the score. Set
+blocking=true only if it looks impossible from where the user stands today; the user will still see the idea and
+decide, so state precisely what would have to change to make it possible (in issues or mitigation).""",
     "constraints_risk": """You audit CONSTRAINTS and RISK of one solution: does it respect every stated constraint,
 and what are the realistic downsides and failure modes for the user (career, relationships, reputation, money,
 time, retaliation, backfire)? A high score means low exposure. Report the risks plainly; risk alone is NEVER a
@@ -76,9 +74,19 @@ class GateOutcome:
 
 
 async def gate(
-    llm: LLMClient, settings: Settings, console: Console, spec: ProblemSpec, ideas: list[Idea], keep: int
+    llm: LLMClient,
+    settings: Settings,
+    console: Console,
+    spec: ProblemSpec,
+    ideas: list[Idea],
+    keep: int,
+    already_audited: list[Idea] | None = None,
 ) -> GateOutcome:
-    """Filtre éliminatoire sur toutes les idées avec le modèle rapide. Garde les `keep` meilleures pour l'audit."""
+    """Filtre éliminatoire sur toutes les idées avec le modèle rapide.
+
+    Envoie à l'audit `keep` idées bien notées ET variées (pas quatre versions de la même idée), loin de celles déjà
+    auditées; les autres passent en réserve, ordonnées par note.
+    """
     system = GATE.format(language=settings.language, jurisdiction=settings.jurisdiction)
 
     async def one(idea: Idea) -> tuple[Idea, GateVerdict]:
@@ -96,9 +104,17 @@ async def gate(
     if failures:
         console.print(f"[yellow]{failures} idées non évaluées (dernier: {err})[/yellow]")
 
+    for idea, verdict in results:
+        if not verdict.plausible and verdict.score > IMPLAUSIBLE_SCORE_CAP:
+            log.debug("filtre %s jugée peu plausible: note %d plafonnée à %d", idea.id, verdict.score, IMPLAUSIBLE_SCORE_CAP)
+            verdict.score = IMPLAUSIBLE_SCORE_CAP
     passed = sorted(((i, v) for i, v in results if v.passed), key=lambda iv: iv[1].score, reverse=True)
+    kept = await pick_diverse(llm, settings, passed, keep, already_audited)
+    kept_ids = {i.id for i, _ in kept}
     return GateOutcome(
-        kept=passed[:keep], reserve=passed[keep:], dropped=[(i, v) for i, v in results if not v.passed]
+        kept=kept,
+        reserve=[iv for iv in passed if iv[0].id not in kept_ids],
+        dropped=[(i, v) for i, v in results if not v.passed],
     )
 
 

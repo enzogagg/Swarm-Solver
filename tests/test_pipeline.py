@@ -113,17 +113,28 @@ def test_risk_alone_never_rejects():
     assert r.risk_level == "high"
 
 
-def test_illegal_or_infeasible_is_rejected_with_reason():
+def test_only_an_established_illegal_or_harmful_verdict_rejects_by_default():
     assert _deep(1, legality=(8, True)).rejection.startswith("illégal")
-    assert _deep(2, legality=(4, False)).rejection.startswith("illégal")
-    assert _deep(3, feasibility=(2, True)).rejection.startswith("infaisable")
+    assert _deep(2, legality=(4, False)).rejection is None  # note basse sans verdict bloquant: alerte, pas rejet
 
 
-def test_hard_or_uncertain_ideas_are_not_rejected_as_infeasible():
-    """Sur un vrai run, 'bloquant' tombait sur 4-5/10 et écartait des idées quasi identiques de façon arbitraire."""
-    assert _deep(1, feasibility=(5, True)).rejection is None
-    assert _deep(2, feasibility=(4, True)).rejection is None
-    assert _deep(3, feasibility=(3, True)).rejection is not None  # seuil: impossible ET note <= 3
+def test_difficulty_and_doubt_raise_warnings_but_never_remove_an_idea():
+    """L'utilisateur décide: infaisable, risqué ou de légalité douteuse restent dans le classement, avec une alerte."""
+    assert _deep(1, feasibility=(2, True)).rejection is None
+    assert _deep(2, feasibility=(5, True)).warnings == ["faisabilité"]  # bloquant selon l'auditeur, même noté 5
+    assert _deep(3, feasibility=(3, False)).warnings == ["faisabilité"]
+    assert _deep(4, legality=(4, False)).warnings == ["légalité"]
+    assert _deep(5, risk=(2, False)).warnings == ["risque"]
+    assert _deep(6).warnings == []
+    assert _deep(7, feasibility=(1, True), legality=(3, False), risk=(1, False)).warnings == [
+        "légalité", "faisabilité", "risque"]
+
+
+def test_an_implausible_idea_is_no_longer_discarded_by_the_gate():
+    implausible = GateVerdict(violates_red_line=False, illegal_or_harmful=False, plausible=False, score=8, reason="x")
+    assert implausible.passed
+    assert not GateVerdict(violates_red_line=True, illegal_or_harmful=False, plausible=True, score=8, reason="x").passed
+    assert not GateVerdict(violates_red_line=False, illegal_or_harmful=True, plausible=True, score=8, reason="x").passed
 
 
 def test_baseline_red_lines_always_in_prompt_even_when_user_gave_others():

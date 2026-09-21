@@ -25,7 +25,8 @@ interview -> recherche web -> analyse -> essaim -> dédup -> filtre rapide -> 3 
   l'objectif, l'entrave ou profite du problème, 6 angles « rapport de force » s'y ajoutent (incitations, hardball
   licite, visibilité des faits, escalade...). Les idées peuvent être dures, cyniques ou politiquement incorrectes :
   le ton n'est pas un critère.
-- **Entonnoir** : ~1000 idées brutes -> dédup -> filtre rapide (1 appel/idée) -> audit approfondi du meilleur lot.
+- **Entonnoir** : ~1000 idées brutes -> dédup -> filtre rapide (1 appel/idée) -> audit approfondi d'un lot **bien noté
+  et varié** (sélection MMR : pas quatre versions de la même idée, et rien de proche de ce qui est déjà audité).
   Un gros modèle sur 1000 idées serait trop lent en local.
 
 ## Mise en route (exemple : GPU 16 Go, type RTX 5080)
@@ -80,7 +81,9 @@ Après le rapport, un prompt `swarm>` s'ouvre :
 | `variantes 2 plus discret` | génère et audite des variantes de la solution 2 (consigne optionnelle) |
 | `encore` | audite le lot suivant d'idées gardées en réserve |
 | `liste` | réaffiche le classement |
-| `rejetées` | ce qui a été écarté (filtre ou audit) et la raison |
+| `rejetées` | tout ce qui n'est pas dans le classement, avec une référence (R1, R2...), l'origine (audit, filtre, toi) et la raison |
+| `garder R2` | remet dans le classement une idée écartée : **tu décides**, pas le programme |
+| `écarter 3` | retire la solution 3 du classement (elle reste dans `rejetées`) |
 | `info le budget est gelé jusqu'en mars` | ajoute un fait à la fiche et relance toute la résolution |
 | `recherche limites de débit de l'API X ?` | cherche sur le web pour une question précise, répond avec sources, enrichit le dossier |
 | `sources` | liste les sources web collectées |
@@ -139,7 +142,7 @@ Dès `-v`, tout (prompts et réponses complets compris) est aussi écrit dans `r
 
 Chaque run écrit dans `runs/<date>/` : `problem.json`, `analysis.json`, `ideas_raw.jsonl`, `ideas_unique.jsonl`,
 `research.json`, `audits.jsonl`, `dropped.jsonl` (idées écartées et raison), `reserve.jsonl` (idées en attente
-d'audit), `stats.json`, `report.md`, `detail-<id>.md`.
+d'audit), `decisions.json` (tes choix `garder` et `écarter`), `stats.json`, `report.md`, `detail-<id>.md`.
 
 ## Réglages (variables d'environnement)
 
@@ -149,6 +152,7 @@ d'audit), `stats.json`, `report.md`, `detail-<id>.md`.
 | `SWARM_STRONG_MODEL` | `qwen3:14b` | interview, analyse, audits, rapport, conseiller |
 | `SWARM_CONCURRENCY` | `4` | requêtes simultanées (aligner sur `OLLAMA_NUM_PARALLEL`) |
 | `SWARM_DEDUP_THRESHOLD` | `0.88` | similarité cosinus au-delà de laquelle deux idées sont fusionnées |
+| `SWARM_DIVERSITY` | `1.0` | poids de la variété dans le choix des idées à auditer (`0` = seulement la note du filtre) |
 | `SWARM_LANGUAGE` | `français` | langue des sorties |
 | `SWARM_JURISDICTION` | `France` | droit de référence pour juger la légalité |
 | `SWARM_WEB` | `1` | `0` désactive la recherche web |
@@ -156,20 +160,35 @@ d'audit), `stats.json`, `report.md`, `detail-<id>.md`.
 | `SWARM_RESEARCH_QUERIES` | `10` | nombre de requêtes du plan |
 | `SWARM_MAX_PAGES` | `24` | pages lues au maximum |
 
-## Ce qui est permis, ce qui est écarté
+## Le programme signale, tu décides
 
 L'objectif de l'utilisateur est conservé tel quel, même inconfortable (remplacer un fournisseur, faire échouer un
-concurrent sur un appel d'offres, voir une personne quitter un poste : ce sont des objectifs valides). Ce qui est
-borné, ce sont les **moyens**, et seulement sur le critère de la **loi** : l'éthique, le ton, le cynisme, la
-manipulation au sens de la persuasion ou du rapport de force, le caractère politiquement incorrect d'une idée ne
-comptent pas. Pression, hardball, silence stratégique, exploitation des intérêts de chacun, faits vrais utilisés
-contre quelqu'un : tout ce qui est légal est permis.
+concurrent sur un appel d'offres, voir une personne quitter un poste : ce sont des objectifs valides). Le ton, le
+cynisme, l'éthique, la manipulation au sens de la persuasion ou du rapport de force, le caractère politiquement
+incorrect d'une idée ne comptent pas. Tout ce qui est légal est permis.
 
-Sont écartés, par le filtre puis par un auditeur dédié : actes illégaux, harcèlement, menaces, diffamation (fausses
-affirmations qui nuisent), preuves fabriquées ou volées, espionnage de comptes ou communications privés,
-provocation ou mise en scène d'une faute, violence physique, campagne soutenue pour tourmenter quelqu'un. Ces
-exclusions sont codées en dur (`BASELINE_RED_LINES`) et ajoutées à chaque prompt, quoi que produise l'interview. Le **risque seul** n'écarte jamais une idée : il baisse son score et la
-classe « audacieuse » dans le rapport. Tout ce qui est écarté reste consultable avec `rejetées`.
+**Ce qui n'écarte plus rien, mais s'affiche en alerte (⚠) dans le tableau :**
+- une faisabilité douteuse (l'idée demande une autorité, un allié ou un coup d'éclat que tu n'as pas encore) ;
+- un risque élevé ;
+- une note de légalité basse sans verdict d'illégalité avéré.
+
+Une idée jugée « peu plausible » par le filtre garde sa place avec une note plafonnée. L'essaim n'est plus limité à ce
+que tu pourrais faire seul dès demain : une idée peut réclamer de l'aide ou une autorité, elle dit alors comment
+l'obtenir.
+
+**Ce qui est écarté par défaut, et que tu peux quand même remettre (`garder`) :**
+- ce que tu as toi-même interdit à l'interview ;
+- ce que le filtre ou l'audit juge reposer sur un acte illégal ou gravement nuisible : harcèlement, menaces,
+  diffamation (fausses affirmations qui nuisent), preuves fabriquées ou volées, espionnage de comptes privés,
+  provocation ou mise en scène d'une faute, violence physique, campagne soutenue pour tourmenter quelqu'un.
+
+Ce jugement vient d'un modèle et peut se tromper (par exemple prendre un manque d'autorité pour de l'illégalité) : c'est
+pourquoi la décision finale reste la tienne. Ces exclusions sont codées en dur (`BASELINE_RED_LINES`) et ajoutées à
+chaque prompt. Tes choix (`garder`, `écarter`) sont enregistrés dans `decisions.json` et conservés par `resume`.
+
+**Ce qui ne change pas :** le programme ne rédige pas d'étape illégale. Si un plan détaillé (`2`) en contenait une, elle
+est remplacée par un moyen légal d'arriver au même résultat, et le plan le dit en une ligne. Remettre une idée dans le
+classement change sa visibilité, pas ce que le programme accepte de produire.
 
 ## Tests
 

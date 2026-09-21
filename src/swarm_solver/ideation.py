@@ -72,9 +72,9 @@ RULES = """Rules:
   work through a DIFFERENT mechanism from the others.
 - Be specific to THIS situation and use the situation analysis. No generic advice ("communicate better",
   "raise awareness", "be more organised").
-- Every idea must be something the USER can start on their own within a week, or a move that makes someone else
-  act. If someone is an obstacle, never rely on their goodwill. Do not propose anything that needs an authority
-  the user does not have (creating a committee, imposing a policy, a company-wide programme).
+- Ideas may need help, resources, allies or an authority the user does not have yet: then say what is needed and
+  how to get it. Do not limit yourself to what the user could do alone tomorrow. If someone is an obstacle, do not
+  count on their goodwill unless the idea explains why they would cooperate.
 - If a web research brief is present, use its facts (procedures, deadlines, what worked and what backfired for
   others) and prefer tactics proven in real cases. Do not propose what it reports as backfiring.
 - Respect the key facts, the constraints and the red lines.

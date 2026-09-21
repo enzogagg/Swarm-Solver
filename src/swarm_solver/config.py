@@ -18,6 +18,8 @@ class Settings:
     # Droit de référence pour juger la légalité des moyens.
     jurisdiction: str = "France"
     dedup_threshold: float = 0.88
+    # Poids de la variété dans le choix des idées à auditer (0 = seulement la note du filtre).
+    diversity: float = 1.0
     runs_dir: Path = Path("runs")
     # Recherche web (les requêtes quittent la machine ; les modèles restent locaux).
     web_enabled: bool = True
@@ -44,6 +46,7 @@ class Settings:
             language=os.getenv("SWARM_LANGUAGE", d.language),
             jurisdiction=os.getenv("SWARM_JURISDICTION", d.jurisdiction),
             dedup_threshold=float(os.getenv("SWARM_DEDUP_THRESHOLD", d.dedup_threshold)),
+            diversity=float(os.getenv("SWARM_DIVERSITY", d.diversity)),
             runs_dir=Path(os.getenv("SWARM_RUNS_DIR", d.runs_dir)),
             web_enabled=os.getenv("SWARM_WEB", "1").lower() not in {"0", "false", "no", "non"},
             search_provider=os.getenv("SWARM_SEARCH_PROVIDER", d.search_provider),

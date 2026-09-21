@@ -8,14 +8,15 @@ from rich.markup import escape
 from rich.table import Table
 
 from .config import Settings
-from .dedup import dedupe_ideas
+from .dedup import dedupe_ideas, pick_diverse
 from .ideation import explore_variants
 from .interrupts import Interrupted, UserQuit, interruptible
 from .llm import LLMClient
 from .logs import LOG
 from .pipeline import RunResult, SolveParams, screen_and_audit, solve
 from .research import ask_web, brief_block
-from .schemas import DeepResult
+from .pipeline import RejectedItem
+from .schemas import DeepResult, GateVerdict
 from .ui import score_bar
 from .verify import deep_verify
 
@@ -28,7 +29,9 @@ HELP = """[bold]Commandes[/bold]
   [cyan]variantes N \\[consigne][/cyan]  génère et audite des variantes de la solution N, ex: variantes 2 plus discret
   [cyan]encore[/cyan]                audite le lot suivant d'idées gardées en réserve
   [cyan]liste[/cyan]                 réaffiche le classement
-  [cyan]rejetées[/cyan]              ce qui a été écarté, et pourquoi
+  [cyan]rejetées[/cyan]              ce qui n'est pas dans le classement, avec une référence (R1, R2...) et la raison
+  [cyan]garder R2[/cyan]             remet une idée écartée dans le classement: c'est toi qui décides, pas le programme
+  [cyan]écarter 3[/cyan]             retire la solution 3 du classement (elle reste dans `rejetées`)
   [cyan]info <texte>[/cyan]          ajoute un fait à la fiche et relance toute la résolution
   [cyan]recherche <question>[/cyan]  cherche sur le web pour répondre à une question précise, avec sources
   [cyan]sources[/cyan]               liste les sources web collectées
@@ -46,7 +49,8 @@ Give, in Markdown and in {language}:
 5. Signals that it is working, signals that it is failing, and when to pivot.
 6. The main risk and how to limit it.
 
-No moralizing. If a step would be unlawful ({jurisdiction} law), silently replace it with a lawful equivalent.
+No moralizing. If a step would be unlawful ({jurisdiction} law), replace it with a lawful way to the same result and
+say so in one line, so the user knows what changed and why.
 Use only the facts provided."""
 
 ADVISOR = """You are the user's strategy advisor. You know their situation and the ranked solutions below.
@@ -79,12 +83,14 @@ class Session:
         table.add_column("#", justify="right", style="bold")
         table.add_column("Score", no_wrap=True)
         table.add_column("Risque", no_wrap=True)
+        table.add_column("Alertes", style="yellow", overflow="fold")
         table.add_column("Solution", overflow="fold")
         table.add_column("Angle", style="dim", overflow="fold")
         colors = {"low": "green", "medium": "yellow", "high": "red"}
         for rank, r in enumerate(self.result.survivors, 1):
             table.add_row(
                 str(rank), score_bar(r.total), f"[{colors[r.risk_level]}]{r.risk_level}[/]",
+                ("⚠ " + ", ".join(r.warnings)) if r.warnings else "",
                 escape(r.idea.title), escape(r.idea.lens[:48]),
             )
         self.console.print(table)
@@ -143,6 +149,10 @@ class Session:
             self.show_table()
         elif cmd in {"rejetées", "rejetees", "rejected"}:
             self._rejected()
+        elif cmd in {"garder", "keep"} and rest.strip():
+            await self._keep(rest.strip())
+        elif cmd in {"écarter", "ecarter", "retirer"} and rest.strip():
+            self._veto(rest.strip())
         elif cmd == "info" and rest.strip():
             await self._info(rest.strip())
         elif cmd in {"recherche", "web"} and rest.strip():
@@ -188,27 +198,76 @@ class Session:
 
     async def _more(self) -> None:
         res = self.result
-        batch = res.peek_reserve(self.params.pool)
+        # Lot varié, et loin des idées déjà auditées. Il n'est retiré de la réserve qu'une fois audité: si on est
+        # interrompu (Ctrl+C), il y reste.
+        batch = await pick_diverse(
+            self.llm, self.settings, res.reserve, self.params.pool, existing=[r.idea for r in res.audited]
+        )
         if not batch:
             self.console.print("[yellow]Réserve vide. Essaie `variantes N` pour générer de nouvelles pistes.[/yellow]")
             return
         before = len(res.survivors)
         audited = await deep_verify(self.llm, self.settings, self.console, res.spec, batch, res.brief)
         res.audited += audited
-        del res.reserve[: len(batch)]  # seulement maintenant: si on est interrompu, le lot reste en réserve
+        audited_ids = {i.id for i, _ in batch}
+        res.reserve = [iv for iv in res.reserve if iv[0].id not in audited_ids]
         res.save()
         self.console.print(f"{len(batch)} idées auditées, {len(res.survivors) - before} retenues.")
         self.show_table()
 
     def _rejected(self) -> None:
-        res = self.result
-        if not res.dropped and not res.audit_rejects:
+        items = self.result.rejected_items()
+        if not items:
             self.console.print("Rien n'a été écarté.")
             return
-        for idea, why in res.dropped:
-            self.console.print(f"[dim]filtre[/dim]  {escape(idea.title)}: {escape(why)}")
-        for r in res.audit_rejects:
-            self.console.print(f"[dim]audit [/dim]  {escape(r.idea.title)}: {escape(r.rejection or '')}")
+        table = Table(title="Hors classement", box=box.ROUNDED, border_style="yellow", header_style="bold yellow")
+        for col in ("Réf", "Origine", "Idée", "Raison"):
+            table.add_column(col, overflow="fold")
+        origins = {"audit": "[red]audit[/red]", "filtre": "[dim]filtre[/dim]", "toi": "[cyan]toi[/cyan]"}
+        for n, it in enumerate(items, 1):
+            reason = it.reason if len(it.reason) <= 220 else it.reason[:217] + "..."
+            table.add_row(f"R{n}", origins[it.origin], escape(it.idea.title), escape(reason))
+        self.console.print(table)
+        self.console.print("[dim]Tu décides : `garder R2` remet une idée dans le classement, même écartée par le programme.[/dim]")
+
+    def _find_rejected(self, ref: str) -> RejectedItem | None:
+        items = self.result.rejected_items()
+        ref = ref.strip()
+        if ref[:1].lower() == "r" and ref[1:].isdigit():
+            n = int(ref[1:])
+            return items[n - 1] if 1 <= n <= len(items) else None
+        return next((it for it in items if it.idea.id.lower() == ref.lower()), None)
+
+    async def _keep(self, ref: str) -> None:
+        item = self._find_rejected(ref)
+        if item is None:
+            self.console.print("[red]Référence inconnue.[/red] Tape `rejetées` pour voir les références (R1, R2...).")
+            return
+        res, audit = self.result, None
+        if item.origin == "filtre":  # jamais auditée: on l'audite maintenant pour lui donner une place dans le classement
+            neutral = GateVerdict(violates_red_line=False, illegal_or_harmful=False, plausible=True, score=5,
+                                  reason="gardée par toi malgré le filtre")
+            audited = await deep_verify(self.llm, self.settings, self.console, res.spec, [(item.idea, neutral)], res.brief)
+            if not audited:
+                self.console.print("[red]L'audit de cette idée a échoué, réessaie.[/red]")
+                return
+            audit = audited[0]
+        res.keep(item, audit)
+        res.save()
+        self.console.print(f"[green]Remise dans le classement :[/green] {escape(item.idea.title)}")
+        shown = audit or next((r for r in res.audited if r.idea.id == item.idea.id), None)
+        if shown and shown.warnings:
+            self.console.print(f"[yellow]⚠ Alertes de l'audit : {', '.join(shown.warnings)}[/yellow]")
+        self.show_table()
+
+    def _veto(self, arg: str) -> None:
+        r = self._pick(arg)
+        if not r:
+            return
+        self.result.veto(r.idea.id)
+        self.result.save()
+        self.console.print(f"Retirée du classement : {escape(r.idea.title)}  [dim](`rejetées` puis `garder` la remettent)[/dim]")
+        self.show_table()
 
     async def _info(self, text: str) -> None:
         spec = self.result.spec.model_copy(update={"key_facts": [*self.result.spec.key_facts, text]})

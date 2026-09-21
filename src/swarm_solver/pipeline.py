@@ -42,6 +42,16 @@ class SolveParams:
     top: int = 8  # solutions détaillées dans le rapport
 
 
+@dataclass(frozen=True)
+class RejectedItem:
+    """Une idée absente du classement, et pourquoi. `origin`: "audit", "filtre" ou "toi" (écartée par l'utilisateur)."""
+
+    idea: Idea
+    reason: str
+    origin: str
+    audit: DeepResult | None = None
+
+
 @dataclass
 class RunResult:
     """État d'un run. La session interactive l'enrichit (variantes, lots suivants)."""
@@ -56,18 +66,49 @@ class RunResult:
     dropped: list[tuple[Idea, str]] = field(default_factory=list)  # écartées par le filtre: (idée, raison)
     reserve: list[tuple[Idea, GateVerdict]] = field(default_factory=list)  # ont passé le filtre, pas encore auditées
     timings: list[tuple[str, float]] = field(default_factory=list)  # (étape, secondes)
+    # Décisions de l'utilisateur, qui l'emportent sur le verdict automatique. Conservées dans decisions.json.
+    restored: set[str] = field(default_factory=set)  # idées écartées par le programme, remises dans le classement
+    vetoed: set[str] = field(default_factory=set)  # idées retirées du classement par l'utilisateur
 
     @property
     def brief(self) -> ResearchBrief | None:
         return self.research.brief if self.research else None
 
+    def is_ranked(self, r: DeepResult) -> bool:
+        """Dans le classement: le choix de l'utilisateur l'emporte sur le verdict automatique."""
+        return r.idea.id not in self.vetoed and (r.rejection is None or r.idea.id in self.restored)
+
     @property
     def survivors(self) -> list[DeepResult]:
-        return sorted((r for r in self.audited if r.rejection is None), key=lambda r: r.total, reverse=True)
+        return sorted((r for r in self.audited if self.is_ranked(r)), key=lambda r: r.total, reverse=True)
 
     @property
     def audit_rejects(self) -> list[DeepResult]:
-        return [r for r in self.audited if r.rejection is not None]
+        return [r for r in self.audited if r.rejection is not None and r.idea.id not in self.restored | self.vetoed]
+
+    def rejected_items(self) -> list[RejectedItem]:
+        """Tout ce qui n'est pas dans le classement: rejets de l'audit, retraits de l'utilisateur, écartées du filtre."""
+        items = [RejectedItem(r.idea, r.rejection or "", "audit", r) for r in self.audit_rejects]
+        items += [RejectedItem(r.idea, "retirée par toi", "toi", r) for r in self.audited if r.idea.id in self.vetoed]
+        items += [RejectedItem(i, why, "filtre") for i, why in self.dropped]
+        return items
+
+    def veto(self, idea_id: str) -> None:
+        self.vetoed.add(idea_id)
+        self.restored.discard(idea_id)
+
+    def keep(self, item: RejectedItem, audit: DeepResult | None = None) -> None:
+        """Remet une idée écartée dans le classement. Pour une idée écartée par le filtre, il faut son audit."""
+        if item.origin == "toi":
+            self.vetoed.discard(item.idea.id)
+        elif item.origin == "audit":
+            self.restored.add(item.idea.id)
+        else:
+            if audit is None:
+                raise ValueError("une idée écartée par le filtre doit être auditée pour rejoindre le classement")
+            self.dropped = [d for d in self.dropped if d[0].id != item.idea.id]
+            self.audited.append(audit)
+            self.restored.add(item.idea.id)
 
     @property
     def stats(self) -> dict[str, int]:
@@ -80,12 +121,6 @@ class RunResult:
             "en réserve": len(self.reserve),
         }
 
-    def peek_reserve(self, n: int) -> list[tuple[Idea, GateVerdict]]:
-        """Les `n` meilleures idées en réserve, SANS les retirer: à retirer une fois leur audit terminé, pour qu'une
-        interruption (Ctrl+C) en plein audit ne les fasse pas disparaître."""
-        self.reserve.sort(key=lambda iv: iv[1].score, reverse=True)
-        return self.reserve[:n]
-
     def save(self) -> None:
         _dump(self.run_dir / "audits.jsonl", self.audited)
         (self.run_dir / "dropped.jsonl").write_text(
@@ -93,6 +128,9 @@ class RunResult:
             encoding="utf-8",
         )
         _dump(self.run_dir / "reserve.jsonl", [ReserveEntry(idea=i, verdict=v) for i, v in self.reserve])
+        (self.run_dir / "decisions.json").write_text(
+            json.dumps({"restored": sorted(self.restored), "vetoed": sorted(self.vetoed)}, indent=2), encoding="utf-8"
+        )
         (self.run_dir / "stats.json").write_text(json.dumps(self.stats, ensure_ascii=False, indent=2), encoding="utf-8")
         if self.research:
             (self.run_dir / "research.json").write_text(self.research.model_dump_json(indent=2), encoding="utf-8")
@@ -114,7 +152,8 @@ async def screen_and_audit(
     """Filtre rapide sur `ideas`, puis audit approfondi des meilleures. Met à jour `result`."""
     if stepper:
         stepper.next("Filtre rapide de chaque idée")
-    outcome = await gate(llm, settings, console, result.spec, ideas, keep=pool)
+    outcome = await gate(llm, settings, console, result.spec, ideas, keep=pool,
+                         already_audited=[r.idea for r in result.audited])
     if stepper:
         stepper.next("Audit approfondi (faisabilité, risques, légalité)")
     audited = await deep_verify(llm, settings, console, result.spec, outcome.kept, result.brief)
@@ -180,6 +219,10 @@ def _restore_audit(result: RunResult, unique: list[Idea], audited: list[DeepResu
                               reason="note du filtre non conservée")
         entries = [ReserveEntry(idea=i, verdict=neutral) for i in unique if i.id not in seen]
     result.reserve = [(e.idea, e.verdict) for e in entries]
+    decisions = result.run_dir / "decisions.json"
+    if decisions.exists():
+        data = json.loads(decisions.read_text(encoding="utf-8"))
+        result.restored, result.vetoed = set(data.get("restored", [])), set(data.get("vetoed", []))
 
 
 async def solve(

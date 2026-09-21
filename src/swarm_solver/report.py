@@ -14,8 +14,11 @@ Structure (Markdown, in {language}):
 4. "Alternatives": the next best solutions, one short paragraph each, and when to prefer them.
 5. "Coups audacieux": solutions marked risk=high. For each: what it could win, what it could cost, and under which
    conditions to consider it. Omit this section if there are none.
-6. "Ce qui a été écarté": one paragraph on what was removed and why (see REJECTED).
+6. "Ce qui a été écarté": one paragraph on what was removed and why (see REJECTED), and remind that the user can
+   bring any of them back with the command `garder`.
 
+Solutions may carry FLAGS (legality, feasibility, risk). They are warnings, not verdicts: the user decides. State
+each flag plainly next to its solution, and never hide or drop a flagged solution.
 Refer to solutions by their number, e.g. "#3". When a statement relies on the WEB RESEARCH BRIEF, cite its source ids
 like [S3]; never invent an id. Use only the material provided; do not invent facts."""
 
@@ -28,7 +31,7 @@ def _render(ranked: list[tuple[int, DeepResult]]) -> str:
             for lens, v in r.lenses.items()
         )
         out.append(
-            f"#{rank} (score {r.total:.1f}, risk={r.risk_level}) [{r.idea.lens}]\n{r.idea.as_text()}\nAudits:\n{audits}"
+            f"#{rank} (score {r.total:.1f}, risk={r.risk_level}, flags={', '.join(r.warnings) or 'none'}) [{r.idea.lens}]\n{r.idea.as_text()}\nAudits:\n{audits}"
         )
     return "\n\n".join(out)
 
